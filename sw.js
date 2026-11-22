@@ -1,5 +1,5 @@
 /* Video Briefs offline cache: the app opens with no internet; briefs live in the page's own storage. */
-const CACHE = 'videobriefs-750a84';
+const CACHE = 'videobriefs-8b2209';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -20,7 +20,8 @@ self.addEventListener('fetch', e => {
   if (rel === null || !(rel === '' || rel === 'index.html' || SHELL.includes('./' + rel))) return;   // only the app's own files
   if (r.mode === 'navigate' || u.pathname.endsWith('/') || u.pathname.endsWith('.html')) {
     // newest page when online, cached page when offline or on a stalled network
-    e.respondWith(withTimeout(fetch(r), 4000)
+    // always revalidate with GitHub (no-cache), so a new version shows on the next open, not 10 minutes later
+    e.respondWith(withTimeout(fetch(r.url, { cache: 'no-cache', credentials: 'same-origin' }), 4000)
       .then(res => { if (res.ok) { const cp = res.clone(); caches.open(CACHE).then(c => c.put('./index.html', cp)); } return res; })
       .catch(() => caches.match('./index.html')));
     return;
