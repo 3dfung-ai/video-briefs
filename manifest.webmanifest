@@ -1,0 +1,28 @@
+{
+  "name": "Video Briefs",
+  "short_name": "Briefs",
+  "description": "Paste a YouTube link; Gemini watches it and writes a brief. Works offline; syncs through your own Google Drive.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F3F0EA",
+  "theme_color": "#1F5E63",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
