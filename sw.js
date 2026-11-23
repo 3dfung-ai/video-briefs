@@ -1,5 +1,5 @@
 /* Video Briefs offline cache: the app opens with no internet; briefs live in the page's own storage. */
-const CACHE = 'videobriefs-9eaf18';
+const CACHE = 'videobriefs-e9e9ce';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
