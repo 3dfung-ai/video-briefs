@@ -380,6 +380,7 @@ mark{background:var(--mark);color:inherit;border-radius:2px;padding:0 1px}
   .seg{grid-template-columns:52px minmax(0,1fr);font-size:15px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+.qrbox{display:flex;justify-content:center;margin:4px 0 12px}.qrbox svg{width:260px;height:260px;max-width:100%;stroke:none;border-radius:6px}.qrbox svg rect{fill:#fff}.qrbox svg path{fill:#000;stroke:none}
 </style>
 </head>
 <body>
@@ -417,7 +418,7 @@ mark{background:var(--mark);color:inherit;border-radius:2px;padding:0 1px}
 <input type="file" id="file-in" hidden>
 <div id="probe" aria-hidden="true" style="position:fixed;left:-10000px;top:0;width:320px;height:180px;overflow:hidden"></div>
 <script>
-const BUILD = "1.0 \u00b7 e9e9ce";
+const BUILD = "1.0 \u00b7 4b435d";
 const SYNC_SCRIPT = "/**\n * Video Briefs sync: keeps the shared copy of your Video Briefs library in your own Google Drive.\n *\n *   Folder : My Drive / 00_Apps / Video Briefs /\n *     index.json   the list of briefs, each with a revision number\n *     _data/       one JSON file per brief (card, brief, transcript, questions). Leave alone.\n *     Briefs/      a readable Markdown copy of every finished brief (open it anywhere: UpNote, Claude, NotebookLM)\n *     backups/     daily copies of index.json (newest 40 kept; older ones go to Drive Trash)\n *\n * One-time setup\n *   1. Run \"setup\" once (Run button). Allow access when Google asks.\n *   2. Copy the sync key from the Execution log.\n *   3. Deploy > New deployment > Web app. Execute as: Me. Who has access: Anyone.\n *   4. Paste the Web app link (ends in /exec) and the key into Video Briefs > Settings > Drive sync.\n *\n * The script answers only requests that carry your sync key. The key, and your Gemini API key if you\n * choose to keep it here for your other devices, live in this script's properties, never in the public page.\n *\n * A device sends a changed brief with the revision it was based on. If another device changed that brief\n * in the meantime, the script refuses the write and returns the current copy so the device can merge it.\n * Deleting a brief forever moves its files to Drive Trash (recoverable for 30 days), never straight to oblivion.\n */\nvar APP = 'videobriefs-sync', VERSION = 1;\nvar FOLDERS = ['00_Apps', 'Video Briefs'];\nvar INDEX = 'index.json', DATA = '_data', MD = 'Briefs', BACKUP = 'backups';\nvar KEEP_BACKUPS = 40, AUTO_BACKUP_HOURS = 20;\nvar MAX_BYTES = 3500000, MAX_MS = 20000;\n\nfunction setup() {\n  var props = PropertiesService.getScriptProperties();\n  var key = props.getProperty('SYNC_KEY');\n  if (!key) {\n    key = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');\n    props.setProperty('SYNC_KEY', key);\n  }\n  var root = root_();\n  sub_(root, DATA); sub_(root, MD); sub_(root, BACKUP);\n  var idx = indexFile_(root);\n  Logger.log('Video Briefs sync is ready.');\n  Logger.log('Sync key: ' + key);\n  Logger.log('Folder: ' + root.getUrl());\n  Logger.log('Next: Deploy > New deployment > Web app (Execute as: Me, Who has access: Anyone). Paste the Web app link and this key into Video Briefs.');\n  return idx.getUrl();\n}\n\n/* Run this only if a setup link was shared by mistake. Every device then needs the new key. */\nfunction newKey() {\n  PropertiesService.getScriptProperties().deleteProperty('SYNC_KEY');\n  setup();\n}\n\nfunction doGet() {\n  return json_({ ok: true, app: APP, v: VERSION, note: 'Video Briefs sync is running. Use this link inside Video Briefs.' });\n}\n\nfunction doPost(e) {\n  var req;\n  try { req = JSON.parse(e.postData.contents); } catch (err) { return json_({ ok: false, error: 'bad_json' }); }\n  var props = PropertiesService.getScriptProperties();\n  var key = props.getProperty('SYNC_KEY');\n  if (!key || !req || typeof req.key !== 'string' || req.key !== key) return json_({ ok: false, error: 'bad_key' });\n  if (req.op === 'ping') return json_({ ok: true, app: APP, v: VERSION });\n  if (req.op === 'config') return json_(config_(req, props));\n\n  var lock = LockService.getScriptLock();\n  if (!lock.tryLock(25000)) return json_({ ok: false, error: 'busy' });\n  try {\n    if (req.op === 'sync') return json_(sync_(req));\n    if (req.op === 'info') return json_(info_());\n    return json_({ ok: false, error: 'bad_op' });\n  } catch (err) {\n    if (err && err.code) return json_({ ok: false, error: err.code });\n    return json_({ ok: false, error: 'server', detail: String((err && err.message) || err).slice(0, 300) });\n  } finally {\n    lock.releaseLock();\n  }\n}\n\n/* The Gemini key, kept here so a newly connected device can pick it up. */\nfunction config_(req, props) {\n  if (req.set && typeof req.set === 'object') {\n    if (typeof req.set.gemini === 'string') {\n      var g = req.set.gemini.trim();\n      if (g) props.setProperty('GEMINI_KEY', g.slice(0, 200)); else props.deleteProperty('GEMINI_KEY');\n    }\n    if (typeof req.set.model === 'string') props.setProperty('GEMINI_MODEL', req.set.model.slice(0, 80));\n  }\n  return { ok: true, gemini: props.getProperty('GEMINI_KEY') || '', model: props.getProperty('GEMINI_MODEL') || '' };\n}\n\n/* ---------- sync ---------- */\nfunction sync_(req) {\n  var t0 = Date.now();\n  var root = root_();\n  var idxFile = indexFile_(root);\n  var store = readIndex_(idxFile);\n  var recs = store.records;\n  var now = Date.now();\n  var device = String(req.device || '').slice(0, 60);\n  var changes = Array.isArray(req.changes) ? req.changes : [];\n  var accepted = [], conflicts = [], apply = [], done = {};\n\n  for (var i = 0; i < changes.length; i++) {\n    var ch = changes[i];\n    if (!ch || typeof ch.id !== 'string' || !ch.id || ch.id.length > 120 || !/^[A-Za-z0-9_-]+$/.test(ch.id) || done[ch.id]) continue;\n    done[ch.id] = true;\n    if (!ch.purge && (!ch.data || typeof ch.data !== 'object' || ch.data.id !== ch.id)) continue;\n    var cur = recs[ch.id];\n    var base = ch.baseRev === undefined ? null : ch.baseRev;\n    if (cur && cur.rev !== base && !(cur.purged && ch.purge)) {\n      conflicts.push({ id: ch.id, rev: cur.rev, purged: !!cur.purged, device: cur.device || '', data: cur.purged ? null : readData_(cur) });\n      continue;\n    }\n    if (!cur && ch.purge) { accepted.push({ id: ch.id, rev: null }); continue; }\n    apply.push(ch);\n  }\n\n  if (apply.length) {\n    var due = !store.lastBackupAt || now - store.lastBackupAt > AUTO_BACKUP_HOURS * 3600 * 1000;\n    if (due && Object.keys(recs).length) { backup_(idxFile, root); store.lastBackupAt = now; }\n    var dataDir = sub_(root, DATA), mdDir = sub_(root, MD);\n    for (var j = 0; j < apply.length; j++) {\n      var c = apply[j], r = recs[c.id] || {};\n      store.rev += 1;\n      if (c.purge) {\n        trash_(r.fid); trash_(r.mid);\n        recs[c.id] = { rev: store.rev, updated: now, device: device, purged: true };\n      } else {\n        var text = JSON.stringify(c.data);\n        var fid = write_(dataDir, r.fid, c.id + '.json', text, 'application/json');\n        var mid = r.mid || '';\n        if (typeof c.md === 'string') {\n          if (c.md) mid = write_(mdDir, r.mid, String(c.mdName || (c.id + '.md')).slice(0, 180), c.md, 'text/markdown');\n          else { trash_(r.mid); mid = ''; }\n        }\n        recs[c.id] = { rev: store.rev, updated: now, device: device, purged: false, fid: fid, mid: mid, size: text.length,\n          title: String(c.data.title || '').slice(0, 120), status: String(c.data.status || ''), deleted: !!c.data.deleted_at };\n      }\n      accepted.push({ id: c.id, rev: store.rev });\n    }\n    store.savedAt = new Date(now).toISOString();\n    store.savedBy = device;\n    idxFile.setContent(JSON.stringify(store));\n  }\n\n  var have = req.have && typeof req.have === 'object' ? req.have : {};\n  var skip = {};\n  accepted.forEach(function (a) { skip[a.id] = true; });\n  conflicts.forEach(function (c) { skip[c.id] = true; });\n  var updates = [], bytes = 0, more = false, unreadable = [];\n  var ids = Object.keys(recs).sort(function (a, b) { return (recs[b].updated || 0) - (recs[a].updated || 0); });\n  for (var k = 0; k < ids.length; k++) {\n    var id = ids[k], rr = recs[id];\n    if (skip[id] || have[id] === rr.rev) continue;\n    if (rr.purged && have[id] === undefined) continue;   // nothing to remove on a device that never had it\n    if (updates.length && (bytes > MAX_BYTES || Date.now() - t0 > MAX_MS)) { more = true; break; }\n    if (rr.purged) { updates.push({ id: id, rev: rr.rev, purged: true, device: rr.device || '' }); continue; }\n    var d = readData_(rr);\n    if (!d) { unreadable.push(id); continue; }\n    bytes += rr.size || 0;\n    updates.push({ id: id, rev: rr.rev, purged: false, device: rr.device || '', data: d });\n  }\n  return {\n    ok: true, accepted: accepted, conflicts: conflicts, updates: updates, more: more, unreadable: unreadable,\n    serverRev: store.rev, count: liveCount_(recs), savedAt: store.savedAt || null, savedBy: store.savedBy || '',\n    lastBackupAt: store.lastBackupAt || null,\n  };\n}\n\nfunction info_() {\n  var root = root_();\n  var store = readIndex_(indexFile_(root));\n  return { ok: true, app: APP, v: VERSION, folderUrl: root.getUrl(), briefsUrl: sub_(root, MD).getUrl(), count: liveCount_(store.records), serverRev: store.rev,\n    savedAt: store.savedAt || null, savedBy: store.savedBy || '', lastBackupAt: store.lastBackupAt || null };\n}\n\nfunction liveCount_(recs) {\n  var n = 0;\n  Object.keys(recs).forEach(function (id) { var r = recs[id]; if (!r.purged && !r.deleted) n++; });\n  return n;\n}\n\n/* ---------- files ---------- */\nfunction write_(folder, fileId, name, text, mime) {\n  if (fileId) {\n    try {\n      var f = DriveApp.getFileById(fileId);\n      if (!f.isTrashed()) { f.setContent(text); if (f.getName() !== name) f.setName(name); return fileId; }\n    } catch (err) { /* gone: make a new one */ }\n  }\n  return folder.createFile(name, text, mime).getId();\n}\nfunction readData_(r) {\n  if (!r || !r.fid) return null;\n  try { return JSON.parse(DriveApp.getFileById(r.fid).getBlob().getDataAsString()); } catch (err) { return null; }\n}\nfunction trash_(fileId) {\n  if (!fileId) return;\n  try { DriveApp.getFileById(fileId).setTrashed(true); } catch (err) { }\n}\n\n/* ---------- backups of the index ---------- */\nfunction backup_(idxFile, root) {\n  var folder = sub_(root, BACKUP);\n  var stamp = new Date().toISOString().replace(/:/g, '-').replace(/\\.\\d+Z$/, 'Z');\n  folder.createFile('index_' + stamp + '.json', idxFile.getBlob().getDataAsString(), 'application/json');\n  var files = [], it = folder.getFiles();\n  while (it.hasNext()) { var f = it.next(); if (/^index_.*\\.json$/.test(f.getName())) files.push(f); }\n  files.sort(function (a, b) { return b.getDateCreated().getTime() - a.getDateCreated().getTime(); });\n  files.slice(KEEP_BACKUPS).forEach(function (f) { f.setTrashed(true); });\n}\n\n/* ---------- storage ---------- */\nfunction emptyStore_() { return { app: APP, schema: 1, rev: 0, records: {} }; }\nfunction readIndex_(file) {\n  var raw = file.getBlob().getDataAsString();\n  if (!raw || !raw.trim()) return emptyStore_();\n  var s;\n  // Never overwrite an index that can't be read: that would orphan every brief.\n  try { s = JSON.parse(raw); } catch (err) { throw { code: 'corrupt_store' }; }\n  if (!s || typeof s !== 'object' || (s.records && typeof s.records !== 'object')) throw { code: 'corrupt_store' };\n  s.records = s.records || {};\n  s.rev = s.rev || 0;\n  s.app = APP; s.schema = 1;\n  return s;\n}\nfunction root_() {\n  var folder = DriveApp.getRootFolder();\n  FOLDERS.forEach(function (name) {\n    var it = folder.getFoldersByName(name);\n    folder = it.hasNext() ? it.next() : folder.createFolder(name);\n  });\n  return folder;\n}\nfunction sub_(parent, name) {\n  var it = parent.getFoldersByName(name);\n  return it.hasNext() ? it.next() : parent.createFolder(name);\n}\nfunction indexFile_(root) {\n  var it = root.getFilesByName(INDEX);\n  if (it.hasNext()) return it.next();\n  return root.createFile(INDEX, JSON.stringify(emptyStore_()), 'application/json');\n}\nfunction json_(o) {\n  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);\n}\n";
 /* ============ Video Briefs logic: pure functions, no DOM (unit-tested in Node) ============ */
 const VB = (() => {
@@ -1501,13 +1502,41 @@ function setupLink() {
   const payload = btoa(unescape(encodeURIComponent(JSON.stringify({ u: App.sync.url, k: App.sync.key })))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   return location.origin + location.pathname + '#sync=' + payload;
 }
+function decodeSetup(payload) {
+  let o = null;
+  try { const b = payload.replace(/-/g, '+').replace(/_/g, '/'); o = JSON.parse(decodeURIComponent(escape(atob(b + '==='.slice((b.length + 3) % 4))))); } catch (e) { }
+  return o && o.u && o.k ? { url: o.u, key: o.k } : null;
+}
 function readSetupHash() {
   const m = /^#sync=([A-Za-z0-9_-]+)$/.exec(location.hash || '');
   if (!m) return null;
-  let o = null;
-  try { const b = m[1].replace(/-/g, '+').replace(/_/g, '/'); o = JSON.parse(decodeURIComponent(escape(atob(b + '==='.slice((b.length + 3) % 4))))); } catch (e) { }
   try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
-  return o && o.u && o.k ? { url: o.u, key: o.k } : null;
+  return decodeSetup(m[1]);
+}
+/* a setup link pasted anywhere: the Home Screen app on an iPhone has no address bar to open it in */
+function setupFromText(t) { const m = /#sync=([A-Za-z0-9_-]{20,})/.exec(String(t || '')); return m ? decodeSetup(m[1]) : null; }
+
+/* ---------- phone setup: a QR code of the setup link (the QR maker loads only when needed) ---------- */
+function loadScript(src) {
+  return new Promise((res, rej) => { if (window.qrcode) return res(); const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.append(s); });
+}
+async function showPhoneQR() {
+  try { await loadScript('qrcode.js'); } catch (e) { toast('Couldn’t load the QR maker (are you offline?). Use Copy setup link instead.'); return; }
+  const qr = qrcode(0, 'M'); qr.addData(setupLink()); qr.make();
+  const n = qr.getModuleCount(), q = 4, size = n + q * 2; let d = '';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + q} ${r + q}h1v1h-1z`;
+  const box = h('div', { class: 'qrbox' });
+  box.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="260" height="260" shape-rendering="crispEdges" role="img" aria-label="QR code with this device's setup link"><rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+  modal({
+    title: 'Set up your phone',
+    body: [box,
+      h('ol', { class: 'olsteps' },
+        h('li', { text: 'Point the iPhone’s camera at the code and tap the link. Video Briefs opens in Safari: tap Turn on sync. Your briefs and your Gemini key come across.' }),
+        h('li', { text: 'To open it like an app: Share › Add to Home Screen.' }),
+        h('li', { text: 'If the Home Screen icon opens an empty library: in Safari, open Settings › Drive sync › Copy setup link; then in the Home Screen app, Settings › Drive sync › Paste setup link.' })),
+      h('p', { class: 'hint', text: 'The code contains your sync key. Close this once the phone is set up.' })],
+    actions: [{ label: 'Done', primary: true }],
+  });
 }
 function offerSetupLink(link) {
   if (!validScriptUrl(link.url)) { toast('That setup link isn’t a Google Apps Script link, so it was ignored.'); return; }
@@ -2728,6 +2757,8 @@ async function addYouTube(p, extra = {}) {
   return rec;
 }
 function addFromText(text, o = {}) {
+  const setup = setupFromText(text);
+  if (setup) { offerSetupLink(setup); return 1; }
   const links = VB.findYouTubeLinks(text);
   if (String(text || '').trim().length > 400 && links.length <= 1) { addPastedTranscript(text, links[0]); return 1; }   // a transcript from NoteGPT or similar
   if (!links.length) { if (o.explain) toast('That isn’t a YouTube link. Paste a link like youtube.com/watch?v=… or youtu.be/…'); return 0; }
@@ -2909,6 +2940,15 @@ function paneSync(redraw) {
   const key = h('input', { class: 'inp', type: 'password', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Sync key' }); key.value = S.key;
   const dev = h('input', { class: 'inp', 'aria-label': 'This device’s name' }); dev.value = S.device;
   const msg = h('p', { class: 'hint', role: 'status' });
+  const takeSetup = l => { url.value = l.url; key.value = l.key; msg.className = 'hint ok'; msg.textContent = 'Setup link recognised. Press Connect.'; };
+  url.addEventListener('input', () => { const l = setupFromText(url.value); if (l) takeSetup(l); });   // a whole setup link pasted into the link box
+  const pasteSetup = async () => {
+    let t = '';
+    try { t = await navigator.clipboard.readText(); } catch (e) { }
+    const l = setupFromText(t);
+    if (l) takeSetup(l);
+    else { msg.className = 'hint bad'; msg.textContent = t ? 'The clipboard doesn’t hold a Video Briefs setup link. Copy it on a connected device (Settings › Drive sync › Copy setup link), then try again.' : 'Couldn’t read the clipboard. Paste the setup link into the Web app link box instead.'; }
+  };
   const folder = h('span', { text: 'My Drive › 00_Apps › Video Briefs' });
   const where = h('div', { class: 'box' }, h('h4', { text: 'Where your briefs are saved' }),
     h('dl', { class: 'kv' },
@@ -2941,7 +2981,7 @@ function paneSync(redraw) {
       h('li', {}, 'Replace everything in the editor with the script: ', h('button', { class: 'btn sm', type: 'button', icon: 'copy', onclick: () => copyText(SYNC_SCRIPT, 'Script copied. Paste it into the Apps Script editor.') }, 'Copy script'), ' then save (Ctrl+S).'),
       h('li', { text: 'Choose “setup” in the function list, press Run, and allow access when Google asks. Copy the sync key from the Execution log.' }),
       h('li', { text: 'Deploy › New deployment › type Web app. Execute as: Me. Who has access: Anyone. Deploy, then copy the Web app link.' }),
-      h('li', { text: 'Paste the link and key below and press Connect. On your other devices, use “Copy setup link” instead of repeating these steps.' })),
+      h('li', { text: 'Paste the link and key below and press Connect. On your other devices, use “Copy setup link” or “Set up your phone” instead of repeating these steps.' })),
     h('p', { class: 'hint', text: 'This is its own script, separate from Quotes and Linework, so briefs live in their own folder. “Anyone” means anyone with the link and the key; without the key the script refuses every request.' }));
   return h('div', {}, where,
     h('label', { class: 'field' }, h('span', { text: 'Web app link from your Video Briefs sync script' }), url),
@@ -2949,7 +2989,9 @@ function paneSync(redraw) {
     msg,
     h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', margin: '4px 0 14px' } },
       h('button', { class: 'btn primary', icon: ready ? 'sync' : 'link', onclick: connect }, ready ? 'Save and sync now' : 'Connect'),
-      ready ? h('button', { class: 'btn', icon: 'copy', onclick: () => copyText(setupLink(), 'Setup link copied. Open it in Brave on your other device.') }, 'Copy setup link for another device') : null,
+      ready ? null : h('button', { class: 'btn', icon: 'copy', onclick: pasteSetup }, 'Paste setup link'),
+      ready ? h('button', { class: 'btn', icon: 'copy', onclick: () => copyText(setupLink(), 'Setup link copied. On the other device, paste it into Brave’s address bar (or anywhere in Video Briefs).') }, 'Copy setup link for another device') : null,
+      ready ? h('button', { class: 'btn', onclick: showPhoneQR }, 'Set up your phone') : null,
       ready ? h('button', { class: 'btn ghost danger', onclick: async () => { if (await confirmBox('Turn off sync on this device?', 'Briefs on this device stay here. The Drive copy and your other devices are not changed.', 'Turn off')) { turnOffSync(); redraw(); } } }, 'Turn off on this device') : null),
     ready ? h('p', { class: 'hint', text: 'The setup link contains your sync key (and through it, your Gemini key if you keep it in the script). Send it only to yourself.' }) : null,
     steps);
@@ -3193,7 +3235,7 @@ function bindUI() {
   });
   $('#add-in').addEventListener('paste', e => {
     const t = e.clipboardData && e.clipboardData.getData('text');
-    if (t && (VB.findYouTubeLinks(t).length || t.trim().length > 400)) { e.preventDefault(); addFromText(t); $('#add-in').value = ''; }
+    if (t && (setupFromText(t) || VB.findYouTubeLinks(t).length || t.trim().length > 400)) { e.preventDefault(); addFromText(t); $('#add-in').value = ''; }
   });
   const q = $('#q');
   let qt = 0;
@@ -3211,7 +3253,7 @@ function bindUI() {
     const files = [...((e.clipboardData && e.clipboardData.files) || [])];
     if (files.length) { e.preventDefault(); addFiles(files); return; }
     const text = e.clipboardData && e.clipboardData.getData('text');
-    if (text && (VB.findYouTubeLinks(text).length || text.trim().length > 400)) { e.preventDefault(); addFromText(text); }
+    if (text && (setupFromText(text) || VB.findYouTubeLinks(text).length || text.trim().length > 400)) { e.preventDefault(); addFromText(text); }
     else if (text) toast('Nothing to brief on the clipboard: copy a YouTube link or a transcript first.');
   });
   // drag and drop: files or links
